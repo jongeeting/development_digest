@@ -24,7 +24,7 @@ def query_carto(sql):
     response.raise_for_status()
     return response.json()
 
-def get_permits(days=7, min_units=5):
+def get_permits(days=7, min_units=1):
     """
     Get residential building permits from the last N days.
 
@@ -33,8 +33,9 @@ def get_permits(days=7, min_units=5):
         min_units: Minimum number of units to include
 
     Returns:
-        List of permit dictionaries
+        List of permit dictionaries with unit counts (from field or extracted)
     """
+    # First get all new construction permits
     sql = f"""
     SELECT
         permitnumber,
@@ -49,14 +50,35 @@ def get_permits(days=7, min_units=5):
     FROM permits
     WHERE commercialorresidential = 'Residential'
     AND permitissuedate >= (CURRENT_DATE - INTERVAL '{days} days')
-    AND numberofunits IS NOT NULL
-    AND CAST(numberofunits AS INTEGER) >= {min_units}
     AND typeofwork = 'New Construction'
     ORDER BY council_district, permitissuedate DESC
     """
 
     result = query_carto(sql)
-    return result.get('rows', [])
+    permits = result.get('rows', [])
+
+    # Enhance permits with extracted unit counts
+    filtered_permits = []
+    for permit in permits:
+        # Use field value if available, otherwise try extraction
+        units = permit.get('numberofunits')
+        if not units:
+            extracted = extract_unit_count_from_text(permit.get('approvedscopeofwork'))
+            if extracted:
+                permit['numberofunits'] = extracted
+                permit['units_source'] = 'extracted'
+            else:
+                permit['units_source'] = 'unknown'
+        else:
+            units = int(units)
+            permit['numberofunits'] = units
+            permit['units_source'] = 'field'
+
+        # Filter by minimum units
+        if permit.get('numberofunits') and int(permit['numberofunits']) >= min_units:
+            filtered_permits.append(permit)
+
+    return filtered_permits
 
 def get_appeals(days=7):
     """
@@ -96,17 +118,40 @@ def extract_unit_count_from_text(text):
     if not text:
         return None
 
-    # Look for patterns like "10 units", "ten dwelling units", etc.
-    patterns = [
-        r'(\d+)[\s-]*(unit|dwelling)',
-        r'(single|two|three|four|five|six|seven|eight|nine|ten)[\s-]*(family|unit)',
-    ]
+    text_lower = text.lower()
+    matches = []
 
-    for pattern in patterns:
-        matches = re.findall(pattern, text.lower())
-        if matches:
-            return matches[0]
-    return None
+    # Pattern 1: "X unit(s)" or "X dwelling(s)" - with optional 's' and parentheses
+    # Matches: "19 unit", "(8) dwelling units", "five dwelling units"
+    pattern1 = re.findall(r'\(?(\d+)\)?[\s-]+(unit|dwelling)s?\b', text_lower)
+    if pattern1:
+        matches.extend([int(m[0]) for m in pattern1])
+
+    # Pattern 2: "X-family" or "X family" with number (handles multifamily, multi-family)
+    # Matches: "8-family", "19 family", "eight (8) family"
+    pattern2 = re.findall(r'\(?(\d+)\)?[\s-]*(?:family|household)', text_lower)
+    if pattern2:
+        matches.extend([int(m) for m in pattern2])
+
+    # Pattern 3: Word numbers with family/dwelling/unit
+    # Matches: "eight family", "nineteen unit", "five dwelling"
+    family_words = {
+        'single': 1, 'one': 1,
+        'two': 2, 'double': 2,
+        'three': 3, 'triple': 3,
+        'four': 4, 'quad': 4,
+        'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
+        'eleven': 11, 'twelve': 12, 'thirteen': 13, 'fourteen': 14, 'fifteen': 15,
+        'sixteen': 16, 'seventeen': 17, 'eighteen': 18, 'nineteen': 19, 'twenty': 20
+    }
+
+    for word, count in family_words.items():
+        # Match word numbers before family/dwelling/unit (with lots of variation)
+        if re.search(rf'\b{word}\b.*?(family|dwelling|unit)', text_lower):
+            matches.append(count)
+
+    # Return the maximum count found (most specific)
+    return max(matches) if matches else None
 
 def group_by_district(items, district_key='council_district'):
     """Group items by council district."""
@@ -143,6 +188,11 @@ def format_appeal_markdown(appeal):
 
     # Extract variance type from grounds
     grounds = appeal.get('appealgrounds', '')
+
+    # Try to extract unit count from grounds
+    units = extract_unit_count_from_text(grounds)
+    units_str = f" | **{units} units**" if units and units >= 5 else ""
+
     if grounds:
         # Truncate and clean up grounds text
         grounds_clean = grounds[:150].replace('\n', ' ').replace('\r', ' ')
@@ -151,14 +201,14 @@ def format_appeal_markdown(appeal):
         variance_desc = "Variance details not available"
 
     lines = [
-        f"- **{address}**",
+        f"- **{address}**{units_str}",
         f"  - Appeal: {appeal_num} | Appellant: {appellant}",
         f"  - Requested variance: {variance_desc}"
     ]
 
     return '\n'.join(lines)
 
-def generate_digest(start_date=None, end_date=None, min_units=5):
+def generate_digest(start_date=None, end_date=None, min_units=1):
     """
     Generate the full weekly digest.
 
@@ -268,8 +318,8 @@ def main():
     parser.add_argument(
         '--min-units',
         type=int,
-        default=5,
-        help='Minimum number of units to include (default: 5)'
+        default=1,
+        help='Minimum number of units to include (default: 1)'
     )
     parser.add_argument(
         '--output',
