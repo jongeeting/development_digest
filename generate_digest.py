@@ -232,6 +232,12 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
     permits = get_permits(days=days_back, min_units=min_units)
     appeals = get_appeals(days=days_back)
 
+    # Extract unit counts from appeals
+    for appeal in appeals:
+        units = extract_unit_count_from_text(appeal.get('appealgrounds', ''))
+        if units:
+            appeal['numberofunits'] = units
+
     # Format date range
     date_range = f"{start_date.strftime('%B %d')} - {end_date.strftime('%B %d, %Y')}"
 
@@ -245,13 +251,28 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
     md.append(f"- {len(appeals)} zoning variance applications filed")
     md.append("")
 
-    # Optional: Add a one-line highlight if there's something notable
-    if permits:
-        largest = max(permits, key=lambda p: int(p.get('numberofunits', 0) or 0))
-        units = largest.get('numberofunits', 'N/A')
-        addr = largest.get('address', 'N/A')
-        district = largest.get('council_district', 'N/A')
-        md.append(f"**Largest project:** {units}-unit development at {addr} (District {district})")
+    # Find largest project across BOTH permits and appeals
+    all_projects = []
+    for p in permits:
+        if p.get('numberofunits'):
+            all_projects.append({
+                'units': int(p.get('numberofunits', 0)),
+                'address': p.get('address', 'N/A'),
+                'district': p.get('council_district', 'N/A'),
+                'type': 'by-right permit'
+            })
+    for a in appeals:
+        if a.get('numberofunits'):
+            all_projects.append({
+                'units': int(a.get('numberofunits', 0)),
+                'address': a.get('address', 'N/A'),
+                'district': a.get('council_district', 'N/A'),
+                'type': 'variance application'
+            })
+
+    if all_projects:
+        largest = max(all_projects, key=lambda x: x['units'])
+        md.append(f"**Largest project:** {largest['units']}-unit {largest['type']} at {largest['address']} (District {largest['district']})")
         md.append("")
 
     # BY-RIGHT HOUSING PERMITS
