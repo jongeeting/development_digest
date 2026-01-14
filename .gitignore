@@ -37,3 +37,10 @@ Thumbs.db
 # Local test files
 test_*.md
 scratch/
+
+# Environment and secrets
+.env
+*.env
+
+# Geographic data (downloaded on demand)
+geodata/
