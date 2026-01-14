@@ -191,17 +191,16 @@ def format_appeal_markdown(appeal):
 
     # Try to extract unit count from grounds
     units = extract_unit_count_from_text(grounds)
-    units_str = f" | **{units} units**" if units and units >= 5 else ""
+    units_str = f" | {units} units" if units and units >= 5 else ""
 
     if grounds:
-        # Truncate and clean up grounds text
-        grounds_clean = grounds[:150].replace('\n', ' ').replace('\r', ' ')
-        variance_desc = f"{grounds_clean}..."
+        # Clean up grounds text - replace newlines/returns but keep full text
+        variance_desc = grounds.replace('\n', ' ').replace('\r', ' ').strip()
     else:
         variance_desc = "Variance details not available"
 
     lines = [
-        f"- **{address}**{units_str}",
+        f"- **{address}{units_str}**",
         f"  - Appeal: {appeal_num} | Appellant: {appellant}",
         f"  - Requested variance: {variance_desc}"
     ]
