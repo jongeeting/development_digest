@@ -41,7 +41,7 @@ jobs:
       - name: Generate digest
         run: |
           DAYS="${{ github.event.inputs.days || '7' }}"
-          MIN_UNITS="${{ github.event.inputs.min_units || '2' }}"
+          MIN_UNITS="${{ github.event.inputs.min_units || '1' }}"
           DATE=$(date +%Y-%m-%d)
 
           python generate_digest.py \
@@ -49,19 +49,15 @@ jobs:
             --min-units "$MIN_UNITS" \
             --output "digests/$DATE.md"
 
-      - name: Commit and push digest
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add digests/*.md
+      - name: Upload digest as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: weekly-digest
+          path: digests/*.md
+          retention-days: 90
 
-          # Only commit if there are changes
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            DATE=$(date +%Y-%m-%d)
-            git commit -m "Add weekly digest for $DATE"
-            git push
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Display digest location
+        run: |
+          echo "✅ Digest generated successfully!"
+          echo "📥 Download it from the 'Artifacts' section below"
+          echo "📄 File: digests/$(date +%Y-%m-%d).md"
