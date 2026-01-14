@@ -16,6 +16,11 @@ on:
         description: 'Minimum number of units'
         required: false
         default: '1'
+      html:
+        description: 'Generate HTML output (better for Substack)'
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   generate-digest:
@@ -42,18 +47,29 @@ jobs:
         run: |
           DAYS="${{ github.event.inputs.days || '7' }}"
           MIN_UNITS="${{ github.event.inputs.min_units || '1' }}"
+          HTML="${{ github.event.inputs.html || 'true' }}"
           DATE=$(date +%Y-%m-%d)
+
+          # Set file extension based on format
+          if [ "$HTML" = "true" ]; then
+            EXT="html"
+            HTML_FLAG="--html"
+          else
+            EXT="md"
+            HTML_FLAG=""
+          fi
 
           python generate_digest.py \
             --days "$DAYS" \
             --min-units "$MIN_UNITS" \
-            --output "digests/$DATE.md"
+            $HTML_FLAG \
+            --output "digests/$DATE.$EXT"
 
       - name: Upload digest as artifact
         uses: actions/upload-artifact@v4
         with:
           name: weekly-digest
-          path: digests/*.md
+          path: digests/*
           retention-days: 90
 
       - name: Display digest location

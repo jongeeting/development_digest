@@ -163,8 +163,8 @@ def group_by_district(items, district_key='council_district'):
 
     return grouped
 
-def format_permit_markdown(permit):
-    """Format a single permit as markdown."""
+def format_permit_markdown(permit, html=False):
+    """Format a single permit as markdown or HTML."""
     address = permit.get('address', 'N/A')
     units = permit.get('numberofunits', 'N/A')
     developer = permit.get('developer', 'N/A')
@@ -173,15 +173,21 @@ def format_permit_markdown(permit):
     # Create link to permit details (L&I permit search)
     permit_link = f"https://li.phila.gov/#details?entity=permits&eid={permit_num}"
 
-    lines = [
-        f"- **{address}** | Units: {units} | Developer: {developer}",
-        f"  - [View permit details]({permit_link})"
-    ]
+    if html:
+        return f"""<li><strong>{address} | Units: {units} | Developer: {developer}</strong>
+<ul>
+<li><a href="{permit_link}">View permit details</a></li>
+</ul>
+</li>"""
+    else:
+        lines = [
+            f"- **{address}** | Units: {units} | Developer: {developer}",
+            f"  - [View permit details]({permit_link})"
+        ]
+        return '\n'.join(lines)
 
-    return '\n'.join(lines)
-
-def format_appeal_markdown(appeal):
-    """Format a single appeal as markdown."""
+def format_appeal_markdown(appeal, html=False):
+    """Format a single appeal as markdown or HTML."""
     address = appeal.get('address', 'N/A')
     appeal_num = appeal.get('appealnumber', 'N/A')
     appellant = appeal.get('primaryappellant', 'N/A')
@@ -199,15 +205,22 @@ def format_appeal_markdown(appeal):
     else:
         variance_desc = "Variance details not available"
 
-    lines = [
-        f"- **{address}{units_str}**",
-        f"  - Appeal: {appeal_num} | Appellant: {appellant}",
-        f"  - Requested variance: {variance_desc}"
-    ]
+    if html:
+        return f"""<li><strong>{address}{units_str}</strong>
+<ul>
+<li>Appeal: {appeal_num} | Appellant: {appellant}</li>
+<li>Requested variance: {variance_desc}</li>
+</ul>
+</li>"""
+    else:
+        lines = [
+            f"- **{address}{units_str}**",
+            f"  - Appeal: {appeal_num} | Appellant: {appellant}",
+            f"  - Requested variance: {variance_desc}"
+        ]
+        return '\n'.join(lines)
 
-    return '\n'.join(lines)
-
-def generate_digest(start_date=None, end_date=None, min_units=1):
+def generate_digest(start_date=None, end_date=None, min_units=1, html=False):
     """
     Generate the full weekly digest.
 
@@ -215,9 +228,10 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
         start_date: Start date for the digest period (datetime or None for 7 days ago)
         end_date: End date for the digest period (datetime or None for today)
         min_units: Minimum number of units for permits
+        html: Generate HTML output instead of markdown (default: False)
 
     Returns:
-        Markdown-formatted digest string
+        Markdown or HTML formatted digest string
     """
     if not end_date:
         end_date = datetime.now()
@@ -240,16 +254,6 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
     # Format date range
     date_range = f"{start_date.strftime('%B %d')} - {end_date.strftime('%B %d, %Y')}"
 
-    # Start building the markdown
-    md = []
-    md.append(f"# PHILADELPHIA DEVELOPMENT DIGEST")
-    md.append(f"Week of {date_range}")
-    md.append("")
-    md.append("## SUMMARY")
-    md.append(f"- {len(permits)} new by-right housing permits ({min_units}+ units)")
-    md.append(f"- {len(appeals)} zoning variance applications filed")
-    md.append("")
-
     # Find largest project across BOTH permits and appeals
     all_projects = []
     for p in permits:
@@ -269,6 +273,23 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
                 'type': 'variance application'
             })
 
+    # Build digest based on output format
+    if html:
+        return generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back)
+    else:
+        return generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back)
+
+def generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back):
+    """Generate markdown formatted digest."""
+    md = []
+    md.append(f"# PHILADELPHIA DEVELOPMENT DIGEST")
+    md.append(f"Week of {date_range}")
+    md.append("")
+    md.append("## SUMMARY")
+    md.append(f"- {len(permits)} new by-right housing permits ({min_units}+ units)")
+    md.append(f"- {len(appeals)} zoning variance applications filed")
+    md.append("")
+
     if all_projects:
         largest = max(all_projects, key=lambda x: x['units'])
         md.append(f"**Largest project:** {largest['units']}-unit {largest['type']} at {largest['address']} (District {largest['district']})")
@@ -280,8 +301,6 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
 
     if permits:
         grouped_permits = group_by_district(permits)
-
-        # Sort districts numerically
         districts = sorted(grouped_permits.keys(),
                          key=lambda x: int(x) if x.isdigit() else 999)
 
@@ -291,7 +310,7 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
             md.append("")
 
             for permit in district_permits:
-                md.append(format_permit_markdown(permit))
+                md.append(format_permit_markdown(permit, html=False))
                 md.append("")
     else:
         md.append(f"No permits with {min_units}+ units found in the last {days_back} days.")
@@ -303,8 +322,6 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
 
     if appeals:
         grouped_appeals = group_by_district(appeals)
-
-        # Sort districts numerically
         districts = sorted(grouped_appeals.keys(),
                          key=lambda x: int(x) if x != 'Unknown' and str(x).isdigit() else 999)
 
@@ -314,7 +331,7 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
             md.append("")
 
             for appeal in district_appeals:
-                md.append(format_appeal_markdown(appeal))
+                md.append(format_appeal_markdown(appeal, html=False))
                 md.append("")
     else:
         md.append(f"No zoning variance applications found in the last {days_back} days.")
@@ -324,6 +341,66 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
     md.append("*Data source: City of Philadelphia L&I Open Data via CARTO API*")
 
     return '\n'.join(md)
+
+def generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back):
+    """Generate HTML formatted digest."""
+    html = []
+    html.append("<h1>PHILADELPHIA DEVELOPMENT DIGEST</h1>")
+    html.append(f"<p>Week of {date_range}</p>")
+    html.append("<h2>SUMMARY</h2>")
+    html.append("<ul>")
+    html.append(f"<li>{len(permits)} new by-right housing permits ({min_units}+ units)</li>")
+    html.append(f"<li>{len(appeals)} zoning variance applications filed</li>")
+    html.append("</ul>")
+
+    if all_projects:
+        largest = max(all_projects, key=lambda x: x['units'])
+        html.append(f"<p><strong>Largest project:</strong> {largest['units']}-unit {largest['type']} at {largest['address']} (District {largest['district']})</p>")
+
+    # BY-RIGHT HOUSING PERMITS
+    html.append("<h2>BY-RIGHT HOUSING PERMITS</h2>")
+
+    if permits:
+        grouped_permits = group_by_district(permits)
+        districts = sorted(grouped_permits.keys(),
+                         key=lambda x: int(x) if x.isdigit() else 999)
+
+        for district in districts:
+            district_permits = grouped_permits[district]
+            html.append(f"<h3>COUNCIL DISTRICT {district}</h3>")
+            html.append("<ul>")
+
+            for permit in district_permits:
+                html.append(format_permit_markdown(permit, html=True))
+
+            html.append("</ul>")
+    else:
+        html.append(f"<p>No permits with {min_units}+ units found in the last {days_back} days.</p>")
+
+    # ZONING VARIANCE APPLICATIONS
+    html.append("<h2>ZONING VARIANCE APPLICATIONS</h2>")
+
+    if appeals:
+        grouped_appeals = group_by_district(appeals)
+        districts = sorted(grouped_appeals.keys(),
+                         key=lambda x: int(x) if x != 'Unknown' and str(x).isdigit() else 999)
+
+        for district in districts:
+            district_appeals = grouped_appeals[district]
+            html.append(f"<h3>COUNCIL DISTRICT {district}</h3>")
+            html.append("<ul>")
+
+            for appeal in district_appeals:
+                html.append(format_appeal_markdown(appeal, html=True))
+
+            html.append("</ul>")
+    else:
+        html.append(f"<p>No zoning variance applications found in the last {days_back} days.</p>")
+
+    html.append("<hr>")
+    html.append("<p><em>Data source: City of Philadelphia L&I Open Data via CARTO API</em></p>")
+
+    return '\n'.join(html)
 
 def main():
     parser = argparse.ArgumentParser(
@@ -346,6 +423,11 @@ def main():
         type=str,
         help='Output file path (default: prints to stdout)'
     )
+    parser.add_argument(
+        '--html',
+        action='store_true',
+        help='Generate HTML output instead of Markdown (better for pasting into Substack)'
+    )
 
     args = parser.parse_args()
 
@@ -356,7 +438,8 @@ def main():
     digest = generate_digest(
         start_date=start_date,
         end_date=end_date,
-        min_units=args.min_units
+        min_units=args.min_units,
+        html=args.html
     )
 
     # Output
