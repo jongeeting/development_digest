@@ -15,7 +15,7 @@ on:
       min_units:
         description: 'Minimum number of units'
         required: false
-        default: '2'
+        default: '1'
 
 jobs:
   generate-digest:
