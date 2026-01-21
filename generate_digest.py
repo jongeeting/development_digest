@@ -57,6 +57,24 @@ def get_permits(days=7, min_units=1):
     result = query_carto(sql)
     permits = result.get('rows', [])
 
+    # Deduplicate permits by permit number (keep most recent)
+    seen_permits = {}
+    for permit in permits:
+        permit_num = permit.get('permitnumber')
+        if permit_num:
+            # Keep the permit with the most recent issue date
+            if permit_num not in seen_permits:
+                seen_permits[permit_num] = permit
+            else:
+                # Compare dates and keep the newer one
+                existing_date = seen_permits[permit_num].get('permitissuedate', '')
+                new_date = permit.get('permitissuedate', '')
+                if new_date > existing_date:
+                    seen_permits[permit_num] = permit
+
+    # Use deduplicated permits
+    permits = list(seen_permits.values())
+
     # Enhance permits with extracted unit counts
     filtered_permits = []
     for permit in permits:
@@ -111,7 +129,24 @@ def get_appeals(days=7):
     """
 
     result = query_carto(sql)
-    return result.get('rows', [])
+    appeals = result.get('rows', [])
+
+    # Deduplicate appeals by appeal number (keep most recent)
+    seen_appeals = {}
+    for appeal in appeals:
+        appeal_num = appeal.get('appealnumber')
+        if appeal_num:
+            # Keep the appeal with the most recent created date
+            if appeal_num not in seen_appeals:
+                seen_appeals[appeal_num] = appeal
+            else:
+                # Compare dates and keep the newer one
+                existing_date = seen_appeals[appeal_num].get('createddate', '')
+                new_date = appeal.get('createddate', '')
+                if new_date > existing_date:
+                    seen_appeals[appeal_num] = appeal
+
+    return list(seen_appeals.values())
 
 def extract_unit_count_from_text(text):
     """Try to extract unit count from permit description."""
