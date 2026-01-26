@@ -1,2 +1,4 @@
 requests>=2.31.0
 shapely>=2.0.0  # Geographic point-in-polygon matching
+python-dateutil>=2.8.0  # Date parsing for freshness checks
+pytz>=2021.1  # Timezone handling for freshness checks

@@ -17,12 +17,76 @@ import argparse
 
 API_BASE = "https://phl.carto.com/api/v2/sql"
 
-def query_carto(sql):
-    """Execute a SQL query against Philadelphia's CARTO API."""
+class DataFreshnessWarning:
+    """Container for data freshness warnings."""
+    def __init__(self):
+        self.warnings = []
+        self.most_recent_permit = None
+        self.most_recent_appeal = None
+
+    def add_warning(self, message):
+        self.warnings.append(message)
+
+    def has_warnings(self):
+        return len(self.warnings) > 0
+
+def query_carto(sql, timeout=30):
+    """
+    Execute a SQL query against Philadelphia's CARTO API.
+
+    Raises:
+        requests.exceptions.RequestException: If API is unreachable
+        requests.exceptions.HTTPError: If API returns error status
+    """
     params = {'q': sql, 'format': 'json'}
-    response = requests.get(API_BASE, params=params)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(API_BASE, params=params, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.Timeout:
+        raise Exception("City CARTO API timed out. The service may be temporarily unavailable.")
+    except requests.exceptions.ConnectionError:
+        raise Exception("Could not connect to City CARTO API. Check your internet connection or the API may be down.")
+    except requests.exceptions.HTTPError as e:
+        raise Exception(f"City CARTO API returned error: {e}")
+
+def check_data_freshness():
+    """
+    Check how recent the permit and variance data is.
+
+    Returns:
+        tuple: (most_recent_permit_date, most_recent_appeal_date, days_old_permits, days_old_appeals)
+    """
+    try:
+        # Check most recent permit
+        permit_query = "SELECT MAX(permitissuedate) as most_recent FROM permits"
+        permit_result = query_carto(permit_query)
+        most_recent_permit = permit_result['rows'][0]['most_recent']
+
+        # Check most recent appeal
+        appeal_query = "SELECT MAX(createddate) as most_recent FROM appeals"
+        appeal_result = query_carto(appeal_query)
+        most_recent_appeal = appeal_result['rows'][0]['most_recent']
+
+        # Calculate age in days
+        from dateutil import parser as date_parser
+        import pytz
+        now = datetime.now(pytz.UTC)
+
+        days_old_permits = None
+        if most_recent_permit:
+            permit_date = date_parser.parse(most_recent_permit)
+            days_old_permits = (now - permit_date).days
+
+        days_old_appeals = None
+        if most_recent_appeal:
+            appeal_date = date_parser.parse(most_recent_appeal)
+            days_old_appeals = (now - appeal_date).days
+
+        return most_recent_permit, most_recent_appeal, days_old_permits, days_old_appeals
+    except Exception as e:
+        # If we can't check freshness, return None
+        return None, None, None, None
 
 def get_permits(days=7, min_units=1):
     """
@@ -276,9 +340,37 @@ def generate_digest(start_date=None, end_date=None, min_units=1, html=False):
     # Calculate days to look back
     days_back = (end_date - start_date).days + 1
 
+    # Check data freshness
+    freshness_warnings = DataFreshnessWarning()
+    most_recent_permit, most_recent_appeal, days_old_permits, days_old_appeals = check_data_freshness()
+
+    # Add warnings if data is stale (more than 3 days old on weekdays)
+    if days_old_permits is not None and days_old_permits > 3:
+        from dateutil import parser as date_parser
+        permit_date_obj = date_parser.parse(most_recent_permit)
+        permit_date_str = permit_date_obj.strftime('%B %d, %Y')
+        freshness_warnings.add_warning(f"⚠️ Permit data last updated: {permit_date_str} ({days_old_permits} days ago)")
+        freshness_warnings.most_recent_permit = permit_date_str
+
+    if days_old_appeals is not None and days_old_appeals > 3:
+        from dateutil import parser as date_parser
+        appeal_date_obj = date_parser.parse(most_recent_appeal)
+        appeal_date_str = appeal_date_obj.strftime('%B %d, %Y')
+        freshness_warnings.add_warning(f"⚠️ Variance data last updated: {appeal_date_str} ({days_old_appeals} days ago)")
+        freshness_warnings.most_recent_appeal = appeal_date_str
+
     # Get data
-    permits = get_permits(days=days_back, min_units=min_units)
-    appeals = get_appeals(days=days_back)
+    try:
+        permits = get_permits(days=days_back, min_units=min_units)
+    except Exception as e:
+        freshness_warnings.add_warning(f"❌ Error fetching permits: {str(e)}")
+        permits = []
+
+    try:
+        appeals = get_appeals(days=days_back)
+    except Exception as e:
+        freshness_warnings.add_warning(f"❌ Error fetching variances: {str(e)}")
+        appeals = []
 
     # Extract unit counts from appeals
     for appeal in appeals:
@@ -310,16 +402,24 @@ def generate_digest(start_date=None, end_date=None, min_units=1, html=False):
 
     # Build digest based on output format
     if html:
-        return generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back)
+        return generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings)
     else:
-        return generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back)
+        return generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings)
 
-def generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back):
+def generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings=None):
     """Generate markdown formatted digest."""
     md = []
     md.append(f"# PHILADELPHIA DEVELOPMENT DIGEST")
     md.append(f"Week of {date_range}")
     md.append("")
+
+    # Add data freshness warnings if present
+    if freshness_warnings and freshness_warnings.has_warnings():
+        md.append("## DATA STATUS")
+        for warning in freshness_warnings.warnings:
+            md.append(f"{warning}")
+        md.append("")
+
     md.append("## SUMMARY")
     md.append(f"- {len(permits)} new by-right housing permits ({min_units}+ units)")
     md.append(f"- {len(appeals)} zoning variance applications filed")
@@ -377,11 +477,20 @@ def generate_markdown_digest(permits, appeals, all_projects, date_range, min_uni
 
     return '\n'.join(md)
 
-def generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back):
+def generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings=None):
     """Generate HTML formatted digest."""
     html = []
     html.append("<h1>PHILADELPHIA DEVELOPMENT DIGEST</h1>")
     html.append(f"<p>Week of {date_range}</p>")
+
+    # Add data freshness warnings if present
+    if freshness_warnings and freshness_warnings.has_warnings():
+        html.append("<h2>DATA STATUS</h2>")
+        html.append("<div style='background-color: #fff3cd; border-left: 4px solid #ffc107; padding: 12px; margin-bottom: 20px;'>")
+        for warning in freshness_warnings.warnings:
+            html.append(f"<p style='margin: 4px 0;'>{warning}</p>")
+        html.append("</div>")
+
     html.append("<h2>SUMMARY</h2>")
     html.append("<ul>")
     html.append(f"<li>{len(permits)} new by-right housing permits ({min_units}+ units)</li>")
