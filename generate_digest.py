@@ -312,6 +312,65 @@ def get_permits(days=7, min_units=1):
 
     return consolidated_permits
 
+def get_commercial_zoning_permits(days=7):
+    """
+    Get commercial zoning permits (ZP-*) from the last N days.
+
+    These are significant commercial projects that require zoning approval,
+    not routine business licenses or trade permits.
+
+    Args:
+        days: Number of days to look back
+
+    Returns:
+        List of commercial zoning permit dictionaries
+    """
+    # Calculate date threshold (N days ago)
+    threshold_date = datetime.now() - timedelta(days=days)
+    threshold_str = threshold_date.strftime('%Y-%m-%d %H:%M:%S')
+
+    # Query for commercial permits (new construction and change of use)
+    params = {
+        'where': f"commercialorresidential = 'Commercial' AND (typeofwork = 'New Construction' OR typeofwork = 'Change of Use') AND permitissuedate >= TIMESTAMP '{threshold_str}'",
+        'outFields': 'permitnumber,address,council_district,permittype,typeofwork,contractorname,approvedscopeofwork,permitissuedate,permitdescription,commercialorresidential',
+        'orderByFields': 'council_district,permitissuedate DESC'
+    }
+
+    all_permits = query_arcgis(ARCGIS_PERMITS_URL, params)
+
+    # Only include ZP (Zoning Permit) - these are significant projects requiring zoning approval
+    # Exclude routine business licenses, trade permits, and mixed-use residential permits
+    zoning_permits = []
+    for permit in all_permits:
+        permit_num = permit.get('permitnumber', '')
+        scope = (permit.get('approvedscopeofwork', '') or '').lower()
+
+        if permit_num.startswith('ZP-'):
+            # Skip if this is a mixed-use permit with residential component
+            # (those should only appear in the residential section)
+            if 'residential' in scope:
+                continue
+
+            # Map contractorname to developer for consistency
+            if 'contractorname' in permit and 'developer' not in permit:
+                permit['developer'] = permit['contractorname']
+            zoning_permits.append(permit)
+
+    # Deduplicate by permit number (keep most recent)
+    seen_permits = {}
+    for permit in zoning_permits:
+        permit_num = permit.get('permitnumber')
+        if permit_num:
+            if permit_num not in seen_permits:
+                seen_permits[permit_num] = permit
+            else:
+                existing_date = seen_permits[permit_num].get('permitissuedate', '')
+                new_date = permit.get('permitissuedate', '')
+                if new_date > existing_date:
+                    seen_permits[permit_num] = permit
+
+    return list(seen_permits.values())
+
 def get_appeals(days=7):
     """
     Get zoning variance applications from the last N days.
@@ -430,6 +489,36 @@ def format_permit_markdown(permit, html=False):
         ]
         return '\n'.join(lines)
 
+def format_commercial_permit_markdown(permit, html=False):
+    """Format a single commercial zoning permit as markdown or HTML."""
+    address = permit.get('address', 'N/A')
+    developer = permit.get('developer', 'N/A')
+    permit_num = permit.get('permitnumber', 'N/A')
+    scope = permit.get('approvedscopeofwork', 'N/A')
+    typeofwork = permit.get('typeofwork', 'N/A')
+
+    # Create link to permit details
+    permit_link = f"https://li.phila.gov/#details?entity=permits&eid={permit_num}"
+
+    if html:
+        return f"""<li><strong>{address}</strong>
+<ul>
+<li>Type: {typeofwork}</li>
+<li>Developer: {developer}</li>
+<li>Scope: {scope}</li>
+<li><a href="{permit_link}">View permit details</a></li>
+</ul>
+</li>"""
+    else:
+        lines = [
+            f"- **{address}**",
+            f"  - Type: {typeofwork}",
+            f"  - Developer: {developer}",
+            f"  - Scope: {scope}",
+            f"  - [View permit details]({permit_link})"
+        ]
+        return '\n'.join(lines)
+
 def format_appeal_markdown(appeal, html=False):
     """Format a single appeal as markdown or HTML."""
     address = appeal.get('address', 'N/A')
@@ -517,6 +606,12 @@ def generate_digest(start_date=None, end_date=None, min_units=1, html=False):
         freshness_warnings.add_warning(f"❌ Error fetching variances: {str(e)}")
         appeals = []
 
+    try:
+        commercial_permits = get_commercial_zoning_permits(days=days_back)
+    except Exception as e:
+        freshness_warnings.add_warning(f"❌ Error fetching commercial zoning permits: {str(e)}")
+        commercial_permits = []
+
     # Extract unit counts from appeals
     for appeal in appeals:
         units = extract_unit_count_from_text(appeal.get('appealgrounds', ''))
@@ -553,11 +648,11 @@ def generate_digest(start_date=None, end_date=None, min_units=1, html=False):
 
     # Build digest based on output format
     if html:
-        return generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings)
+        return generate_html_digest(permits, commercial_permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings)
     else:
-        return generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings)
+        return generate_markdown_digest(permits, commercial_permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings)
 
-def generate_markdown_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings=None):
+def generate_markdown_digest(permits, commercial_permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings=None):
     """Generate markdown formatted digest."""
     md = []
     md.append(f"# PHILADELPHIA DEVELOPMENT DIGEST")
@@ -573,6 +668,7 @@ def generate_markdown_digest(permits, appeals, all_projects, date_range, min_uni
 
     md.append("## SUMMARY")
     md.append(f"- {len(permits)} new by-right housing permits ({min_units}+ units)")
+    md.append(f"- {len(commercial_permits)} new commercial zoning permits")
     md.append(f"- {len(appeals)} zoning variance applications filed")
     md.append("")
 
@@ -602,6 +698,27 @@ def generate_markdown_digest(permits, appeals, all_projects, date_range, min_uni
         md.append(f"No permits with {min_units}+ units found in the last {days_back} days.")
         md.append("")
 
+    # COMMERCIAL ZONING PERMITS
+    md.append("## COMMERCIAL ZONING PERMITS")
+    md.append("")
+
+    if commercial_permits:
+        grouped_commercial = group_by_district(commercial_permits)
+        districts = sorted(grouped_commercial.keys(),
+                         key=lambda x: int(x) if x.isdigit() else 999)
+
+        for district in districts:
+            district_commercial = grouped_commercial[district]
+            md.append(f"### COUNCIL DISTRICT {district}")
+            md.append("")
+
+            for permit in district_commercial:
+                md.append(format_commercial_permit_markdown(permit, html=False))
+                md.append("")
+    else:
+        md.append(f"No commercial zoning permits found in the last {days_back} days.")
+        md.append("")
+
     # ZONING VARIANCE APPLICATIONS
     md.append("## ZONING VARIANCE APPLICATIONS")
     md.append("")
@@ -628,7 +745,7 @@ def generate_markdown_digest(permits, appeals, all_projects, date_range, min_uni
 
     return '\n'.join(md)
 
-def generate_html_digest(permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings=None):
+def generate_html_digest(permits, commercial_permits, appeals, all_projects, date_range, min_units, days_back, freshness_warnings=None):
     """Generate HTML formatted digest."""
     html = []
     html.append("<h1>PHILADELPHIA DEVELOPMENT DIGEST</h1>")
@@ -645,6 +762,7 @@ def generate_html_digest(permits, appeals, all_projects, date_range, min_units, 
     html.append("<h2>SUMMARY</h2>")
     html.append("<ul>")
     html.append(f"<li>{len(permits)} new by-right housing permits ({min_units}+ units)</li>")
+    html.append(f"<li>{len(commercial_permits)} new commercial zoning permits</li>")
     html.append(f"<li>{len(appeals)} zoning variance applications filed</li>")
     html.append("</ul>")
 
@@ -671,6 +789,26 @@ def generate_html_digest(permits, appeals, all_projects, date_range, min_units, 
             html.append("</ul>")
     else:
         html.append(f"<p>No permits with {min_units}+ units found in the last {days_back} days.</p>")
+
+    # COMMERCIAL ZONING PERMITS
+    html.append("<h2>COMMERCIAL ZONING PERMITS</h2>")
+
+    if commercial_permits:
+        grouped_commercial = group_by_district(commercial_permits)
+        districts = sorted(grouped_commercial.keys(),
+                         key=lambda x: int(x) if x.isdigit() else 999)
+
+        for district in districts:
+            district_commercial = grouped_commercial[district]
+            html.append(f"<h3>COUNCIL DISTRICT {district}</h3>")
+            html.append("<ul>")
+
+            for permit in district_commercial:
+                html.append(format_commercial_permit_markdown(permit, html=True))
+
+            html.append("</ul>")
+    else:
+        html.append(f"<p>No commercial zoning permits found in the last {days_back} days.</p>")
 
     # ZONING VARIANCE APPLICATIONS
     html.append("<h2>ZONING VARIANCE APPLICATIONS</h2>")
