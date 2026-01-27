@@ -15,6 +15,11 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 import argparse
 
+# ArcGIS REST API endpoints
+ARCGIS_PERMITS_URL = "https://services.arcgis.com/fLeGjb7u4uXqeF9q/ArcGIS/rest/services/PERMITS/FeatureServer/0/query"
+ARCGIS_APPEALS_URL = "https://services.arcgis.com/fLeGjb7u4uXqeF9q/ArcGIS/rest/services/APPEALS/FeatureServer/0/query"
+
+# Legacy CARTO endpoint (kept for reference, not used)
 API_BASE = "https://phl.carto.com/api/v2/sql"
 
 class DataFreshnessWarning:
@@ -30,25 +35,55 @@ class DataFreshnessWarning:
     def has_warnings(self):
         return len(self.warnings) > 0
 
-def query_carto(sql, timeout=30):
+def query_arcgis(url, params, timeout=30):
     """
-    Execute a SQL query against Philadelphia's CARTO API.
+    Execute a query against Philadelphia's ArcGIS FeatureServer.
+
+    Args:
+        url: The FeatureServer query endpoint
+        params: Query parameters dict
+        timeout: Request timeout in seconds
+
+    Returns:
+        List of feature attributes (normalized to look like CARTO rows)
 
     Raises:
-        requests.exceptions.RequestException: If API is unreachable
-        requests.exceptions.HTTPError: If API returns error status
+        Exception: If API is unreachable or returns error
     """
-    params = {'q': sql, 'format': 'json'}
     try:
-        response = requests.get(API_BASE, params=params, timeout=timeout)
+        # Add default parameters
+        params.setdefault('f', 'json')
+        params.setdefault('outFields', '*')
+        params.setdefault('returnGeometry', 'false')
+
+        response = requests.get(url, params=params, timeout=timeout)
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+
+        # Check for ArcGIS errors
+        if 'error' in data:
+            raise Exception(f"ArcGIS API error: {data['error'].get('message', 'Unknown error')}")
+
+        # Convert ArcGIS features to CARTO-like rows format
+        features = data.get('features', [])
+        rows = []
+        for feature in features:
+            attrs = feature.get('attributes', {})
+            # Convert timestamp fields from milliseconds to ISO format for consistency
+            for key, value in attrs.items():
+                if value and 'date' in key.lower() and isinstance(value, (int, float)):
+                    # Convert millisecond timestamp to datetime
+                    attrs[key] = datetime.fromtimestamp(value / 1000).isoformat()
+            rows.append(attrs)
+
+        return rows
+
     except requests.exceptions.Timeout:
-        raise Exception("City CARTO API timed out. The service may be temporarily unavailable.")
+        raise Exception("City ArcGIS API timed out. The service may be temporarily unavailable.")
     except requests.exceptions.ConnectionError:
-        raise Exception("Could not connect to City CARTO API. Check your internet connection or the API may be down.")
+        raise Exception("Could not connect to City ArcGIS API. Check your internet connection or the API may be down.")
     except requests.exceptions.HTTPError as e:
-        raise Exception(f"City CARTO API returned error: {e}")
+        raise Exception(f"City ArcGIS API returned error: {e}")
 
 def check_data_freshness():
     """
@@ -58,15 +93,25 @@ def check_data_freshness():
         tuple: (most_recent_permit_date, most_recent_appeal_date, days_old_permits, days_old_appeals)
     """
     try:
-        # Check most recent permit
-        permit_query = "SELECT MAX(permitissuedate) as most_recent FROM permits"
-        permit_result = query_carto(permit_query)
-        most_recent_permit = permit_result['rows'][0]['most_recent']
+        # Check most recent permit from ArcGIS
+        permit_params = {
+            'where': '1=1',
+            'outFields': 'permitissuedate',
+            'orderByFields': 'permitissuedate DESC',
+            'resultRecordCount': 1
+        }
+        permit_rows = query_arcgis(ARCGIS_PERMITS_URL, permit_params)
+        most_recent_permit = permit_rows[0]['permitissuedate'] if permit_rows else None
 
-        # Check most recent appeal
-        appeal_query = "SELECT MAX(createddate) as most_recent FROM appeals"
-        appeal_result = query_carto(appeal_query)
-        most_recent_appeal = appeal_result['rows'][0]['most_recent']
+        # Check most recent appeal from ArcGIS
+        appeal_params = {
+            'where': '1=1',
+            'outFields': 'createddate',
+            'orderByFields': 'createddate DESC',
+            'resultRecordCount': 1
+        }
+        appeal_rows = query_arcgis(ARCGIS_APPEALS_URL, appeal_params)
+        most_recent_appeal = appeal_rows[0]['createddate'] if appeal_rows else None
 
         # Calculate age in days
         from dateutil import parser as date_parser
@@ -76,11 +121,17 @@ def check_data_freshness():
         days_old_permits = None
         if most_recent_permit:
             permit_date = date_parser.parse(most_recent_permit)
+            # Make timezone-aware if it isn't already
+            if permit_date.tzinfo is None:
+                permit_date = pytz.UTC.localize(permit_date)
             days_old_permits = (now - permit_date).days
 
         days_old_appeals = None
         if most_recent_appeal:
             appeal_date = date_parser.parse(most_recent_appeal)
+            # Make timezone-aware if it isn't already
+            if appeal_date.tzinfo is None:
+                appeal_date = pytz.UTC.localize(appeal_date)
             days_old_appeals = (now - appeal_date).days
 
         return most_recent_permit, most_recent_appeal, days_old_permits, days_old_appeals
@@ -99,27 +150,18 @@ def get_permits(days=7, min_units=1):
     Returns:
         List of permit dictionaries with unit counts (from field or extracted)
     """
-    # First get all new construction permits
-    sql = f"""
-    SELECT
-        permitnumber,
-        address,
-        council_district,
-        permittype,
-        typeofwork,
-        numberofunits,
-        contractorname as developer,
-        approvedscopeofwork,
-        permitissuedate
-    FROM permits
-    WHERE commercialorresidential = 'Residential'
-    AND permitissuedate >= (CURRENT_DATE - INTERVAL '{days} days')
-    AND typeofwork = 'New Construction'
-    ORDER BY council_district, permitissuedate DESC
-    """
+    # Calculate date threshold (N days ago)
+    threshold_date = datetime.now() - timedelta(days=days)
+    threshold_str = threshold_date.strftime('%Y-%m-%d %H:%M:%S')
 
-    result = query_carto(sql)
-    permits = result.get('rows', [])
+    # Query ArcGIS for new construction residential permits
+    params = {
+        'where': f"commercialorresidential = 'Residential' AND typeofwork = 'New Construction' AND permitissuedate >= TIMESTAMP '{threshold_str}'",
+        'outFields': 'permitnumber,address,council_district,permittype,typeofwork,numberofunits,contractorname,approvedscopeofwork,permitissuedate',
+        'orderByFields': 'council_district,permitissuedate DESC'
+    }
+
+    permits = query_arcgis(ARCGIS_PERMITS_URL, params)
 
     # Deduplicate permits by permit number (keep most recent)
     seen_permits = {}
@@ -142,6 +184,10 @@ def get_permits(days=7, min_units=1):
     # Enhance permits with extracted unit counts
     filtered_permits = []
     for permit in permits:
+        # Map contractorname to developer for consistency
+        if 'contractorname' in permit and 'developer' not in permit:
+            permit['developer'] = permit['contractorname']
+
         # Use field value if available, otherwise try extraction
         units = permit.get('numberofunits')
         if not units:
@@ -172,28 +218,19 @@ def get_appeals(days=7):
     Returns:
         List of appeal dictionaries
     """
-    sql = f"""
-    SELECT
-        appealnumber,
-        address,
-        council_district,
-        appealtype,
-        applicationtype,
-        appealgrounds,
-        createddate,
-        primaryappellant
-    FROM appeals
-    WHERE createddate >= (CURRENT_DATE - INTERVAL '{days} days')
-    AND (
-        applicationtype LIKE '%ZBA%'
-        OR appealtype LIKE '%Variance%'
-        OR LOWER(appealgrounds) LIKE '%variance%'
-    )
-    ORDER BY council_district, createddate DESC
-    """
+    # Calculate date threshold (N days ago)
+    threshold_date = datetime.now() - timedelta(days=days)
+    threshold_str = threshold_date.strftime('%Y-%m-%d %H:%M:%S')
 
-    result = query_carto(sql)
-    appeals = result.get('rows', [])
+    # Query ArcGIS for variance appeals
+    # Note: ArcGIS doesn't support LIKE with wildcards in the same way, so we use broader filter
+    params = {
+        'where': f"createddate >= TIMESTAMP '{threshold_str}' AND (UPPER(applicationtype) LIKE '%ZBA%' OR UPPER(appealtype) LIKE '%VARIANCE%' OR UPPER(appealgrounds) LIKE '%VARIANCE%')",
+        'outFields': 'appealnumber,address,council_district,appealtype,applicationtype,appealgrounds,createddate,primaryappellant',
+        'orderByFields': 'council_district,createddate DESC'
+    }
+
+    appeals = query_arcgis(ARCGIS_APPEALS_URL, params)
 
     # Deduplicate appeals by appeal number (keep most recent)
     seen_appeals = {}
@@ -473,7 +510,7 @@ def generate_markdown_digest(permits, appeals, all_projects, date_range, min_uni
         md.append("")
 
     md.append("---")
-    md.append("*Data source: City of Philadelphia L&I Open Data via CARTO API*")
+    md.append("*Data source: City of Philadelphia L&I Open Data via ArcGIS*")
 
     return '\n'.join(md)
 
@@ -542,7 +579,7 @@ def generate_html_digest(permits, appeals, all_projects, date_range, min_units, 
         html.append(f"<p>No zoning variance applications found in the last {days_back} days.</p>")
 
     html.append("<hr>")
-    html.append("<p><em>Data source: City of Philadelphia L&I Open Data via CARTO API</em></p>")
+    html.append("<p><em>Data source: City of Philadelphia L&I Open Data via ArcGIS</em></p>")
 
     return '\n'.join(html)
 
