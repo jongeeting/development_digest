@@ -165,6 +165,20 @@ def get_permits(days=7, min_units=1):
 
     all_permits = query_arcgis(ARCGIS_PERMITS_URL, params)
 
+    # Filter out trade permits (electrical, plumbing, mechanical, fire suppression, sprinkler)
+    # Keep only building permits (RP, CP, ZP)
+    TRADE_PERMIT_PREFIXES = ('EP-', 'PP-', 'MP-', 'FP-', 'SP-')
+
+    filtered_permits = []
+    for permit in all_permits:
+        permit_num = permit.get('permitnumber', '')
+        # Skip trade permits - they're accessory permits for the main building permit
+        if permit_num.startswith(TRADE_PERMIT_PREFIXES):
+            continue
+        filtered_permits.append(permit)
+
+    all_permits = filtered_permits
+
     # For Change of Use permits, filter to only those converting TO residential
     permits = []
     for permit in all_permits:
