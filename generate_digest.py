@@ -240,7 +240,53 @@ def get_permits(days=7, min_units=1):
             elif int(has_units) >= min_units:
                 filtered_permits.append(permit)
 
-    return filtered_permits
+    # Group permits by address + developer to consolidate multi-unit projects
+    # that file separate permits for each unit
+    address_groups = {}
+    for permit in filtered_permits:
+        address = permit.get('address', '').strip().upper()
+        developer = (permit.get('developer') or 'Unknown').strip().upper()
+        key = (address, developer)
+
+        if key not in address_groups:
+            address_groups[key] = []
+        address_groups[key].append(permit)
+
+    # Consolidate groups with multiple permits at same address
+    consolidated_permits = []
+    for (address, developer), group_permits in address_groups.items():
+        if len(group_permits) == 1:
+            # Single permit for this address - keep as is
+            consolidated_permits.append(group_permits[0])
+        else:
+            # Multiple permits for same address/developer - consolidate
+            base_permit = group_permits[0].copy()
+
+            # Sum the units (skip if any are "Unknown")
+            total_units = 0
+            has_unknown = False
+            permit_numbers = []
+
+            for p in group_permits:
+                permit_numbers.append(p.get('permitnumber', ''))
+                units = p.get('numberofunits')
+                if isinstance(units, str) and 'Unknown' in units:
+                    has_unknown = True
+                    break
+                elif isinstance(units, (int, float)):
+                    total_units += int(units)
+
+            # Update the consolidated permit
+            if not has_unknown and total_units > 0:
+                base_permit['numberofunits'] = total_units
+                base_permit['permit_count'] = len(group_permits)
+                base_permit['permit_numbers'] = permit_numbers
+                consolidated_permits.append(base_permit)
+            else:
+                # If we can't consolidate (unknown units), keep all separate
+                consolidated_permits.extend(group_permits)
+
+    return consolidated_permits
 
 def get_appeals(days=7):
     """
@@ -339,19 +385,23 @@ def format_permit_markdown(permit, html=False):
     units = permit.get('numberofunits', 'N/A')
     developer = permit.get('developer', 'N/A')
     permit_num = permit.get('permitnumber', 'N/A')
+    permit_count = permit.get('permit_count', 0)
 
     # Create link to permit details (L&I permit search)
     permit_link = f"https://li.phila.gov/#details?entity=permits&eid={permit_num}"
 
+    # Add note if multiple permits were consolidated
+    consolidated_note = f" ({permit_count} permits)" if permit_count > 1 else ""
+
     if html:
-        return f"""<li><strong>{address} | Units: {units} | Developer: {developer}</strong>
+        return f"""<li><strong>{address} | Units: {units}{consolidated_note} | Developer: {developer}</strong>
 <ul>
 <li><a href="{permit_link}">View permit details</a></li>
 </ul>
 </li>"""
     else:
         lines = [
-            f"- **{address}** | Units: {units} | Developer: {developer}",
+            f"- **{address}** | Units: {units}{consolidated_note} | Developer: {developer}",
             f"  - [View permit details]({permit_link})"
         ]
         return '\n'.join(lines)
