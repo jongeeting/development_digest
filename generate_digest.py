@@ -154,14 +154,29 @@ def get_permits(days=7, min_units=1):
     threshold_date = datetime.now() - timedelta(days=days)
     threshold_str = threshold_date.strftime('%Y-%m-%d %H:%M:%S')
 
-    # Query ArcGIS for new construction residential permits
+    # Query ArcGIS for residential permits (new construction and conversions)
+    # Include Change of Use permits regardless of commercial/residential flag
+    # because conversions TO residential are marked as "Commercial"
     params = {
-        'where': f"commercialorresidential = 'Residential' AND typeofwork = 'New Construction' AND permitissuedate >= TIMESTAMP '{threshold_str}'",
-        'outFields': 'permitnumber,address,council_district,permittype,typeofwork,numberofunits,contractorname,approvedscopeofwork,permitissuedate',
+        'where': f"((commercialorresidential = 'Residential' AND typeofwork = 'New Construction') OR (typeofwork = 'Change of Use')) AND permitissuedate >= TIMESTAMP '{threshold_str}'",
+        'outFields': 'permitnumber,address,council_district,permittype,typeofwork,numberofunits,contractorname,approvedscopeofwork,permitissuedate,permitdescription,commercialorresidential',
         'orderByFields': 'council_district,permitissuedate DESC'
     }
 
-    permits = query_arcgis(ARCGIS_PERMITS_URL, params)
+    all_permits = query_arcgis(ARCGIS_PERMITS_URL, params)
+
+    # For Change of Use permits, filter to only those converting TO residential
+    permits = []
+    for permit in all_permits:
+        typeofwork = permit.get('typeofwork', '')
+        scope = (permit.get('approvedscopeofwork', '') or '').lower()
+
+        # Include New Construction residential permits
+        if typeofwork == 'New Construction':
+            permits.append(permit)
+        # Include Change of Use only if scope mentions residential
+        elif typeofwork == 'Change of Use' and 'residential' in scope:
+            permits.append(permit)
 
     # Deduplicate permits by permit number (keep most recent)
     seen_permits = {}
@@ -191,20 +206,39 @@ def get_permits(days=7, min_units=1):
         # Use field value if available, otherwise try extraction
         units = permit.get('numberofunits')
         if not units:
+            # Try extracting from approvedscopeofwork first
             extracted = extract_unit_count_from_text(permit.get('approvedscopeofwork'))
+            if not extracted:
+                # Also try permitdescription field
+                extracted = extract_unit_count_from_text(permit.get('permitdescription'))
+
             if extracted:
                 permit['numberofunits'] = extracted
                 permit['units_source'] = 'extracted'
             else:
-                permit['units_source'] = 'unknown'
+                # For Zoning Permits (ZP-*) with "Multi-Family" but no unit count,
+                # flag as "Unknown" but include them since they're likely significant
+                scope = permit.get('approvedscopeofwork', '').lower()
+                permit_num = permit.get('permitnumber', '')
+                if permit_num.startswith('ZP-') and 'multi-family' in scope:
+                    permit['numberofunits'] = 'Unknown (Multi-Family)'
+                    permit['units_source'] = 'zoning_multifamily'
+                else:
+                    permit['units_source'] = 'unknown'
         else:
             units = int(units)
             permit['numberofunits'] = units
             permit['units_source'] = 'field'
 
         # Filter by minimum units
-        if permit.get('numberofunits') and int(permit['numberofunits']) >= min_units:
-            filtered_permits.append(permit)
+        # Include if: has unit count >= min_units, OR is a multi-family zoning permit with unknown units
+        has_units = permit.get('numberofunits')
+        if has_units:
+            if isinstance(has_units, str) and 'Unknown' in has_units:
+                # Include multi-family zoning permits even without specific unit count
+                filtered_permits.append(permit)
+            elif int(has_units) >= min_units:
+                filtered_permits.append(permit)
 
     return filtered_permits
 
@@ -421,21 +455,27 @@ def generate_digest(start_date=None, end_date=None, min_units=1, html=False):
     # Find largest project across BOTH permits and appeals
     all_projects = []
     for p in permits:
-        if p.get('numberofunits'):
-            all_projects.append({
-                'units': int(p.get('numberofunits', 0)),
-                'address': p.get('address', 'N/A'),
-                'district': p.get('council_district', 'N/A'),
-                'type': 'by-right permit'
-            })
+        units = p.get('numberofunits')
+        if units:
+            # Skip if units is unknown/string
+            if isinstance(units, (int, float)) or (isinstance(units, str) and units.isdigit()):
+                all_projects.append({
+                    'units': int(units),
+                    'address': p.get('address', 'N/A'),
+                    'district': p.get('council_district', 'N/A'),
+                    'type': 'by-right permit'
+                })
     for a in appeals:
-        if a.get('numberofunits'):
-            all_projects.append({
-                'units': int(a.get('numberofunits', 0)),
-                'address': a.get('address', 'N/A'),
-                'district': a.get('council_district', 'N/A'),
-                'type': 'variance application'
-            })
+        units = a.get('numberofunits')
+        if units:
+            # Skip if units is unknown/string
+            if isinstance(units, (int, float)) or (isinstance(units, str) and units.isdigit()):
+                all_projects.append({
+                    'units': int(units),
+                    'address': a.get('address', 'N/A'),
+                    'district': a.get('council_district', 'N/A'),
+                    'type': 'variance application'
+                })
 
     # Build digest based on output format
     if html:
