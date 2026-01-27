@@ -165,17 +165,27 @@ def get_permits(days=7, min_units=1):
 
     all_permits = query_arcgis(ARCGIS_PERMITS_URL, params)
 
-    # Filter out trade permits (electrical, plumbing, mechanical, fire suppression, sprinkler)
-    # Keep only building permits (RP, CP, ZP)
-    TRADE_PERMIT_PREFIXES = ('EP-', 'PP-', 'MP-', 'FP-', 'SP-')
+    # ALLOWLIST approach: Only include building permits that can add new residential units
+    #
+    # Permit types we WANT:
+    #   RP - Residential building permits (new construction)
+    #   CP - Construction permits (can include residential)
+    #   ZP - Zoning permits (large multi-family projects)
+    #
+    # Permit types we DON'T WANT:
+    #   EP, PP, MP, FP, SP - Trade permits (electrical, plumbing, mechanical, fire, sprinkler)
+    #   DP - Demolition (removes units, doesn't add them)
+    #   GP, GM - General/miscellaneous (administrative)
+    #
+    # This prevents issues like mechanical permits being counted as new units
+    BUILDING_PERMIT_PREFIXES = ('RP-', 'CP-', 'ZP-')
 
     filtered_permits = []
     for permit in all_permits:
         permit_num = permit.get('permitnumber', '')
-        # Skip trade permits - they're accessory permits for the main building permit
-        if permit_num.startswith(TRADE_PERMIT_PREFIXES):
-            continue
-        filtered_permits.append(permit)
+        # Only allow building permits that represent new construction
+        if permit_num.startswith(BUILDING_PERMIT_PREFIXES):
+            filtered_permits.append(permit)
 
     all_permits = filtered_permits
 
