@@ -212,7 +212,7 @@ def format_permit_markdown(permit):
     # Add BPN dashboard link if parcel can be identified
     bpn_link = build_bpn_link(permit)
     if bpn_link:
-        lines.append(f"  - [View on Build Philly Now]({bpn_link})")
+        lines.append(f"  - [View on BPN Dashboard]({bpn_link})")
 
     return '\n'.join(lines)
 
@@ -245,7 +245,7 @@ def format_appeal_markdown(appeal):
     # Add BPN dashboard link if parcel can be identified
     bpn_link = build_bpn_link(appeal)
     if bpn_link:
-        lines.append(f"  - [View on Build Philly Now]({bpn_link})")
+        lines.append(f"  - [View on BPN Dashboard]({bpn_link})")
 
     return '\n'.join(lines)
 
