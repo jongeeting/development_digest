@@ -16,6 +16,7 @@ from collections import defaultdict
 import argparse
 
 API_BASE = "https://phl.carto.com/api/v2/sql"
+BPN_BASE_URL = "https://buildphillynow.com"
 
 def query_carto(sql):
     """Execute a SQL query against Philadelphia's CARTO API."""
@@ -36,6 +37,7 @@ def get_permits(days=7, min_units=1):
         List of permit dictionaries with unit counts (from field or extracted)
     """
     # First get all new construction permits
+    # Use ST_X/ST_Y on the_geom to get WGS84 coordinates for BPN dashboard links
     sql = f"""
     SELECT
         permitnumber,
@@ -46,7 +48,10 @@ def get_permits(days=7, min_units=1):
         numberofunits,
         contractorname as developer,
         approvedscopeofwork,
-        permitissuedate
+        permitissuedate,
+        opa_account_num,
+        ST_X(the_geom) as lng,
+        ST_Y(the_geom) as lat
     FROM permits
     WHERE commercialorresidential = 'Residential'
     AND permitissuedate >= (CURRENT_DATE - INTERVAL '{days} days')
@@ -90,6 +95,7 @@ def get_appeals(days=7):
     Returns:
         List of appeal dictionaries
     """
+    # Use ST_X/ST_Y on the_geom to get WGS84 coordinates for BPN dashboard links
     sql = f"""
     SELECT
         appealnumber,
@@ -99,7 +105,10 @@ def get_appeals(days=7):
         applicationtype,
         appealgrounds,
         createddate,
-        primaryappellant
+        primaryappellant,
+        opa_account_num,
+        ST_X(the_geom) as lng,
+        ST_Y(the_geom) as lat
     FROM appeals
     WHERE createddate >= (CURRENT_DATE - INTERVAL '{days} days')
     AND (
@@ -153,6 +162,28 @@ def extract_unit_count_from_text(text):
     # Return the maximum count found (most specific)
     return max(matches) if matches else None
 
+def build_bpn_link(item):
+    """Build a Build Philly Now dashboard link for a permit or appeal.
+
+    Uses opa_account_num as the parcel identifier and WGS84 coordinates
+    (from PostGIS ST_X/ST_Y) for map positioning.
+    Returns None if opa_account_num is missing.
+    """
+    opa_num = item.get('opa_account_num')
+    lng = item.get('lng')
+    lat = item.get('lat')
+
+    if not opa_num:
+        return None
+
+    # Build URL with parcel number and coordinates for map centering
+    url = f"{BPN_BASE_URL}?parcel={opa_num}"
+    if lng and lat:
+        url += f"&lng={lng}&lat={lat}"
+
+    return url
+
+
 def group_by_district(items, district_key='council_district'):
     """Group items by council district."""
     grouped = defaultdict(list)
@@ -177,6 +208,11 @@ def format_permit_markdown(permit):
         f"- **{address}** | Units: {units} | Developer: {developer}",
         f"  - [View permit details]({permit_link})"
     ]
+
+    # Add BPN dashboard link if parcel can be identified
+    bpn_link = build_bpn_link(permit)
+    if bpn_link:
+        lines.append(f"  - [View on Build Philly Now]({bpn_link})")
 
     return '\n'.join(lines)
 
@@ -205,6 +241,11 @@ def format_appeal_markdown(appeal):
         f"  - Appeal: {appeal_num} | Appellant: {appellant}",
         f"  - Requested variance: {variance_desc}"
     ]
+
+    # Add BPN dashboard link if parcel can be identified
+    bpn_link = build_bpn_link(appeal)
+    if bpn_link:
+        lines.append(f"  - [View on Build Philly Now]({bpn_link})")
 
     return '\n'.join(lines)
 
@@ -301,7 +342,9 @@ def generate_digest(start_date=None, end_date=None, min_units=1):
         md.append("")
 
     md.append("---")
-    md.append("*Data source: City of Philadelphia L&I Open Data via CARTO API*")
+    md.append(f"*Data source: City of Philadelphia L&I Open Data via CARTO API*")
+    md.append("")
+    md.append(f"*Explore zoning, ownership, and transit data for every property at [{BPN_BASE_URL}]({BPN_BASE_URL})*")
 
     return '\n'.join(md)
 
